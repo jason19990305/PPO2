@@ -16,53 +16,97 @@ def orthogonal_init(layer, gain=1.0):
     nn.init.orthogonal_(layer.weight, gain=gain)
     nn.init.constant_(layer.bias, 0)
 class Actor(nn.Module):
-    def __init__(self,args):
+    def __init__(self,args,hidden_layers=[64,64]):
         super(Actor, self).__init__()
         self.num_states = args.num_states
         self.num_actions = args.num_actions
+        # add in list
+        hidden_layers.insert(0,self.num_states)
+        hidden_layers.append(self.num_actions)
+        print(hidden_layers)
 
-        self.fc1 = nn.Linear(self.num_states,128)
-        self.fc2 = nn.Linear(128,128)
-        self.mean_layer = nn.Linear(128,self.num_actions)
+        # create layers
+        fc_list = []
+
+        for i in range(len(hidden_layers)-1):
+            input_num = hidden_layers[i]
+            output_num = hidden_layers[i+1]
+            layer = nn.Linear(input_num,output_num)
+            
+            fc_list.append(layer)
+            orthogonal_init(fc_list[-1])
+        orthogonal_init(fc_list[-1], gain=0.01)
+
+        # put in ModuleList
+        self.layers = nn.ModuleList(fc_list)
         self.std = nn.Parameter(torch.zeros(1,self.num_actions))   
+
+        #self.fc1 = nn.Linear(self.num_states,64)
+        #self.fc2 = nn.Linear(64,64)
+        #self.mean_layer = nn.Linear(64,self.num_actions)
+        #self.std = nn.Parameter(torch.zeros(1,self.num_actions))   
         self.tanh = nn.Tanh()
-        self.sigmoid =nn.Sigmoid()
         # use orthogonal_init
-        orthogonal_init(self.fc1)
-        orthogonal_init(self.fc2)
-        orthogonal_init(self.mean_layer, gain=0.01)
-    # when actor(s) will activate the function
-    def forward(self,state):
-        s = self.tanh(self.fc1(state))
-        s = self.tanh(self.fc2(s))
-        mean = self.tanh(self.mean_layer(s))
-        return mean
+        #orthogonal_init(self.fc1)
+        #orthogonal_init(self.fc2)
+        #orthogonal_init(self.mean_layer, gain=0.01)
+
+    # when actor(s) will activate the function 
+    def forward(self,s):
+        for layer in self.layers:
+            s = self.tanh(layer(s))
+        #s = self.tanh(self.fc1(state))
+        #s = self.tanh(self.fc2(s))
+        #mean = self.tanh(self.mean_layer(s))
+        return s
 
     def get_dist(self,state):
         mean = self.forward(state)
-        std = self.sigmoid(self.std.expand_as(mean))
+        log_std = self.std.expand_as(mean)
+        std = torch.exp(log_std)
         dist = Normal(mean,std)
         return dist
 
 class Critic(nn.Module):
-    def __init__(self, args):
+    def __init__(self, args,hidden_layers=[64,64]):
         super(Critic, self).__init__()
         self.num_states = args.num_states
-        self.fc1 = nn.Linear(self.num_states,128)
-        self.fc2 = nn.Linear(128,128)
-        self.mean_layer = nn.Linear(128,1)
-        self.tanh = nn.Tanh()
+        # add in list
+        hidden_layers.insert(0,self.num_states)
+        hidden_layers.append(1)
+        print(hidden_layers)
 
+        # create layers
+        fc_list = []
+
+        for i in range(len(hidden_layers)-1):
+            input_num = hidden_layers[i]
+            output_num = hidden_layers[i+1]
+            layer = nn.Linear(input_num,output_num)
+            
+            fc_list.append(layer)
+            orthogonal_init(fc_list[-1])
+        # put in ModuleList
+        self.layers = nn.ModuleList(fc_list)
+        #self.fc1 = nn.Linear(self.num_states,64)
+        #self.fc2 = nn.Linear(64,64)
+        #self.fc3 = nn.Linear(64,1)
+        self.tanh = nn.Tanh()
+        #orthogonal_init(self.fc1)
+        #orthogonal_init(self.fc2)
+        #orthogonal_init(self.fc3) 
     def forward(self,s):
-        s = self.tanh(self.fc1(s))
-        s = self.tanh(self.fc2(s))
-        v_s = self.mean_layer(s)
+        for i in range(len(self.layers)-1):
+            s = self.tanh(self.layers[i](s))
+        #s = self.tanh(self.fc1(s))
+        #s = self.tanh(self.fc2(s))
+        v_s = self.layers[-1](s)
         return v_s
 
 class Agent():
-    def __init__(self,args):
-        self.actor = Actor(args)
-        self.critic = Critic(args)
+    def __init__(self,args,hidden_layer_num_list=[64,64]):
+        self.actor = Actor(args,hidden_layer_num_list.copy())
+        self.critic = Critic(args,hidden_layer_num_list.copy())
         self.epochs = args.epochs
         self.batch_size = args.batch_size
         self.mini_batch_size = args.mini_batch_size
@@ -121,18 +165,24 @@ class Agent():
             s = state_norm(s, update=False)  # During the evaluating,update=False
             done = False
             episode_reward = 0
+            episode_steps = 0
             while True:
                 if render:
                     time.sleep(0.08)
+                
                 a = self.evaluate(s)  # We use the deterministic policy during the evaluating
             
                 s_, r, done, truncted,_ = env.step(a)
+                if episode_steps == 0 and done:
+                    s = env.reset()[0]
+                    continue
                 s_ = state_norm(s_, update=False)
                 episode_reward += r
                 s = s_
                 #print(episode_reward)
                 if truncted or done:
                     break
+                episode_steps += 1
             evaluate_reward += episode_reward
 
         return evaluate_reward / times
@@ -142,6 +192,7 @@ class Agent():
         evaluate_num = 0  # Record the number of evaluations
         evaluate_rewards = []  # Record the rewards during the evaluating
         total_steps = 0  # Record the total steps during the training
+        training_count = 0
         end_training = False
 
         reward_scaling = RewardScaling(shape=1, gamma=args.gamma)
@@ -151,7 +202,7 @@ class Agent():
         log_dir=home_directory+'/Log/PPO_'+env_name+datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
         writer = SummaryWriter(log_dir=log_dir)
-
+        
         while total_steps < args.max_train_steps:
             s = env.reset()[0]
             s = state_norm(s)
@@ -160,10 +211,13 @@ class Agent():
             done = False
 
             while True:
-                episode_steps += 1
+                
                 a, a_logprob = self.choose_action(s)  # Action and the corresponding log probability
                 
                 s_, r, done, truncated,_ = env.step(a)
+                if episode_steps == 0 and done:
+                    s = env.reset()[0]
+                    continue
 
                 s_ = state_norm(s_)
                 r = reward_scaling(r)
@@ -178,7 +232,8 @@ class Agent():
                 if replay_buffer.count == args.batch_size:
                     self.update(replay_buffer, total_steps)
                     replay_buffer.count = 0
-                    print("Step:",total_steps,"/",args.max_train_steps,"\t")
+                    print("Training epoch :",training_count,"\tStep:",total_steps,"/",args.max_train_steps,"\t")
+                    training_count += 1
 
                 # Evaluate the policy every 'evaluate_freq' steps
                 if total_steps % args.evaluate_freq_steps == 0:
@@ -191,6 +246,7 @@ class Agent():
 
                 if truncated or done:
                     break
+                episode_steps += 1
     def update(self,replay_buffer,total_steps):
         s, a, old_log_prob, r, s_, dw, done = replay_buffer.numpy_to_tensor()  # Get training data .type is tensor
 
