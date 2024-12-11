@@ -31,10 +31,10 @@ A PyTorch implementation of PPO (Proximal Policy Optimization) algorithm for con
 
 1. Import the required classes:
 
-```
+```python
 from continuous import PPOAgent
 from normalization import StateNormalizer, RewardScaler
-
+```
 2. Create environment and agent:
 
 ```python
